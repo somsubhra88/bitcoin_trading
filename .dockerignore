@@ -1,0 +1,29 @@
+# Keep the build context small and — critically — keep secrets out of the image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.venv
+venv
+.claude
+
+__pycache__
+*.py[cod]
+*.egg-info
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+.python-version
+
+# Local-only artefacts.
+data
+logs
+tests
+project.md
+docker-compose*.yml
+Dockerfile
+.DS_Store

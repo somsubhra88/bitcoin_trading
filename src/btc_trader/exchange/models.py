@@ -1,0 +1,236 @@
+"""Exchange-neutral market and trading value objects.
+
+Pydantic models sit at the external boundary (PROJECT.md §49).  Every numeric
+field is a ``Decimal``: values are parsed from the JSON *text* so no binary
+float ever touches a price or size.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from btc_trader.enums import ExchangeHealthState, OrderType, Side
+
+
+class _Frozen(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+def _to_decimal(value: Any) -> Any:
+    """Coerce ints/floats/strings to ``Decimal`` without float rounding.
+
+    ``json.loads`` yields floats for unquoted JSON numbers; ``repr`` of a float
+    is the shortest string that round-trips, so ``Decimal(repr(x))`` recovers the
+    value the exchange actually sent rather than its binary expansion.
+    """
+    if value is None or isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        return Decimal(repr(value))
+    if isinstance(value, int | str):
+        return Decimal(str(value))
+    return value
+
+
+class Ticker(_Frozen):
+    """Normalised ticker snapshot."""
+
+    exchange: str
+    product_code: str
+    exchange_timestamp: datetime
+    received_at: datetime
+
+    tick_id: int | None = None
+    state: str | None = None
+
+    ltp: Decimal | None = None
+    best_bid: Decimal | None = None
+    best_ask: Decimal | None = None
+    best_bid_size: Decimal | None = None
+    best_ask_size: Decimal | None = None
+    total_bid_depth: Decimal | None = None
+    total_ask_depth: Decimal | None = None
+    market_bid_size: Decimal | None = None
+    market_ask_size: Decimal | None = None
+    volume: Decimal | None = None
+    volume_by_product: Decimal | None = None
+
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+    _decimals = field_validator(
+        "ltp",
+        "best_bid",
+        "best_ask",
+        "best_bid_size",
+        "best_ask_size",
+        "total_bid_depth",
+        "total_ask_depth",
+        "market_bid_size",
+        "market_ask_size",
+        "volume",
+        "volume_by_product",
+        mode="before",
+    )(_to_decimal)
+
+    @property
+    def spread(self) -> Decimal | None:
+        if self.best_ask is None or self.best_bid is None:
+            return None
+        return self.best_ask - self.best_bid
+
+    @property
+    def mid_price(self) -> Decimal | None:
+        if self.best_ask is None or self.best_bid is None:
+            return None
+        return (self.best_ask + self.best_bid) / Decimal(2)
+
+
+class OrderBookLevel(_Frozen):
+    price: Decimal
+    size: Decimal
+
+    _decimals = field_validator("price", "size", mode="before")(_to_decimal)
+
+
+class OrderBook(_Frozen):
+    exchange: str
+    product_code: str
+    received_at: datetime
+    mid_price: Decimal | None = None
+    bids: tuple[OrderBookLevel, ...] = ()
+    asks: tuple[OrderBookLevel, ...] = ()
+
+    _decimals = field_validator("mid_price", mode="before")(_to_decimal)
+
+    @property
+    def best_bid(self) -> Decimal | None:
+        return self.bids[0].price if self.bids else None
+
+    @property
+    def best_ask(self) -> Decimal | None:
+        return self.asks[0].price if self.asks else None
+
+    def truncated(self, levels: int) -> OrderBook:
+        """Return a copy keeping only the top ``levels`` price levels per side."""
+        return self.model_copy(update={"bids": self.bids[:levels], "asks": self.asks[:levels]})
+
+
+class Execution(_Frozen):
+    """A public market execution (trade print)."""
+
+    exchange: str
+    product_code: str
+    exchange_execution_id: str
+    side: Side | None = None
+    price: Decimal
+    size: Decimal
+    executed_at: datetime
+    received_at: datetime
+
+    _decimals = field_validator("price", "size", mode="before")(_to_decimal)
+
+    @field_validator("side", mode="before")
+    @classmethod
+    def _blank_side_is_none(cls, value: Any) -> Any:
+        """bitFlyer reports an empty side for executions triggered by its engine."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
+class Balance(_Frozen):
+    currency_code: str
+    amount: Decimal
+    available: Decimal
+
+    _decimals = field_validator("amount", "available", mode="before")(_to_decimal)
+
+
+class ExchangeHealth(_Frozen):
+    exchange: str
+    product_code: str
+    state: ExchangeHealthState
+    checked_at: datetime
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def _unknown_state(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.upper() not in ExchangeHealthState.__members__:
+            return ExchangeHealthState.UNKNOWN
+        return value
+
+
+class OrderRequest(_Frozen):
+    """An order the application intends to place.
+
+    ``client_order_id`` is generated by the application before submission and is
+    the idempotency key for duplicate protection (PROJECT.md §30).
+    """
+
+    product_code: str
+    side: Side
+    order_type: OrderType
+    size: Decimal
+    price: Decimal | None = None
+    client_order_id: str
+    minute_to_expire: int | None = None
+    time_in_force: str | None = None
+
+    _decimals = field_validator("size", "price", mode="before")(_to_decimal)
+
+    @field_validator("size")
+    @classmethod
+    def _positive_size(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("order size must be positive")
+        return value
+
+
+class OrderResponse(_Frozen):
+    """The exchange's acknowledgement of a submission.
+
+    An acknowledgement is *not* a fill — status must be reconciled (§31).
+    """
+
+    exchange_order_id: str | None
+    client_order_id: str
+    accepted: bool
+    raw_response: dict[str, Any] = Field(default_factory=dict)
+
+
+class OrderStatusReport(_Frozen):
+    """Reconciled view of an order as the exchange currently sees it."""
+
+    exchange_order_id: str | None
+    client_order_id: str | None
+    product_code: str
+    side: Side | None
+    order_type: OrderType | None
+    status: str
+    requested_size: Decimal | None = None
+    filled_size: Decimal = Decimal("0")
+    average_price: Decimal | None = None
+    price: Decimal | None = None
+    commission: Decimal = Decimal("0")
+    raw_response: dict[str, Any] = Field(default_factory=dict)
+
+    _decimals = field_validator(
+        "requested_size", "filled_size", "average_price", "price", "commission", mode="before"
+    )(_to_decimal)
+
+
+__all__ = [
+    "Balance",
+    "ExchangeHealth",
+    "Execution",
+    "OrderBook",
+    "OrderBookLevel",
+    "OrderRequest",
+    "OrderResponse",
+    "OrderStatusReport",
+    "Ticker",
+]
