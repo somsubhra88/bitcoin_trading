@@ -7,7 +7,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1
 
 WORKDIR /app
 
@@ -16,7 +17,9 @@ RUN python -m venv /opt/venv \
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN /opt/venv/bin/uv sync --frozen --no-dev --extra dashboard --no-editable \
+RUN /opt/venv/bin/uv sync --frozen --no-dev --extra dashboard --extra research-ui --no-editable \
+    && /opt/venv/bin/uv pip install --index-url https://download.pytorch.org/whl/cpu \
+        --python /opt/venv/bin/python "torch==2.14.0" \
     && /opt/venv/bin/pip uninstall --yes uv
 
 
@@ -39,6 +42,8 @@ WORKDIR /app
 COPY --chown=btc:btc alembic.ini ./alembic.ini
 COPY --chown=btc:btc migrations ./migrations
 COPY --chown=btc:btc dashboard ./dashboard
+COPY --chown=btc:btc conf ./conf
+RUN mkdir -p /app/runs && chown btc:btc /app/runs
 
 # Non-root: nothing in this image needs to write outside the venv or /tmp.
 USER btc

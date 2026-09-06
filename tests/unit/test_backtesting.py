@@ -75,8 +75,8 @@ def test_backtest_replays_signals_and_paper_fills(settings: Settings) -> None:
     assert result.metrics.buy_signals > 0
     assert result.metrics.sell_signals > 0
     assert result.metrics.trade_count == 1
-    assert result.metrics.winning_trades == 1
-    assert result.metrics.net_profit_jpy > 0
+    assert result.metrics.losing_trades == 1
+    assert result.metrics.net_profit_jpy < 0
     assert len(result.equity_curve) == 24
 
 

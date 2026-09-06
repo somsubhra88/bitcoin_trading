@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -889,6 +890,14 @@ def _sidebar(settings: Settings, client: ApiClient) -> dict[str, Any]:
     settings = _effective_dashboard_settings(settings, client)
     with st.sidebar:
         st.header("Controls")
+        page = st.radio(
+            "Workspace",
+            ["Trading Platform", "Deep RL Research"],
+            key="workspace",
+        )
+        if page == "Deep RL Research":
+            st.caption("Train and replay the local ArchetypeTrader research stack.")
+            return {"page": page}
         period = st.selectbox(
             "Chart period",
             options=list(PERIOD_LABELS),
@@ -1271,7 +1280,13 @@ def _sidebar(settings: Settings, client: ApiClient) -> dict[str, Any]:
         st.divider()
         st.caption(f"API: {settings.api_base_url}")
         st.caption(f"Timezone: {settings.dashboard_timezone}")
-    return {"period": period, "interval": interval, "chart_type": chart_type, "strategy": strategy}
+    return {
+        "page": page,
+        "period": period,
+        "interval": interval,
+        "chart_type": chart_type,
+        "strategy": strategy,
+    }
 
 
 def _collect_now(client: ApiClient) -> None:
@@ -1356,6 +1371,177 @@ def render_page(settings: Settings, client: ApiClient, controls: dict[str, Any])
     render_system(status, data["runs"], data["events"], tz)
 
 
+def _rl_config_paths() -> list[Path]:
+    return sorted(Path("conf").glob("*.yaml"))
+
+
+def _rl_result(key: str, value: Any) -> None:
+    st.session_state[key] = value
+
+
+def render_rl_page() -> None:
+    """Run the local ArchetypeTrader pipeline from a dedicated UI workspace."""
+    st.title("Deep RL Research")
+    st.caption(
+        "Phase 1 learns archetypes, Phase 2 selects them with recurrent PPO/DQN, "
+        "and Phase 3 adapts them. All training and replay remain paper-only."
+    )
+
+    config_paths = _rl_config_paths()
+    if not config_paths:
+        st.error("No RL configs found. Expected `conf/smoke.yaml` or `conf/btc_full.yaml`.")
+        return
+
+    selected_path = st.selectbox(
+        "Experiment configuration",
+        config_paths,
+        format_func=str,
+        key="rl_config_path",
+    )
+    try:
+        from archetype_trader.config import load_config
+
+        cfg = load_config(selected_path)
+    except ModuleNotFoundError as exc:
+        st.error(
+            "The RL dependencies are not installed. Run "
+            "`uv sync --locked --extra research --extra dashboard`."
+        )
+        st.caption(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001 - config errors belong in the page
+        st.error(f"Invalid RL configuration: {exc}")
+        return
+
+    fold = st.number_input("Walk-forward fold", min_value=0, step=1, value=0, key="rl_fold")
+    seed = st.number_input("Random seed", min_value=0, step=1, value=cfg.seed, key="rl_seed")
+    st.info(
+        f"Output: `{cfg.run_dir()}` · selector: `{cfg.phase2.algo}` · "
+        f"device: `{cfg.device}` · live execution is unavailable"
+    )
+    if cfg.data.source != "synthetic" and cfg.data.path:
+        data_path = Path(cfg.data.path)
+        if not data_path.exists():
+            st.warning(
+                f"Input data is missing: `{data_path}`. Place the Parquet/CSV file under "
+                "the host `data/` directory, then refresh the page."
+            )
+
+    try:
+        from archetype_trader.pipeline import RunLayout
+
+        layout = RunLayout.for_config(cfg)
+    except ModuleNotFoundError as exc:
+        st.error("Install the research extra before using the RL workspace.")
+        st.caption(str(exc))
+        return
+
+    st.subheader("Pipeline")
+    st.caption("Run stages in order. Training may take time and runs in the Streamlit process.")
+    stage_columns = st.columns(5)
+    stages = (
+        ("Ingest", "rl_ingest"),
+        ("Features", "rl_features"),
+        ("Phase 1", "rl_phase1"),
+        ("Phase 2", "rl_phase2"),
+        ("Phase 3", "rl_phase3"),
+    )
+    for column, (label, key) in zip(stage_columns, stages, strict=True):
+        if column.button(label, key=f"button_{key}", width="stretch"):
+            try:
+                from archetype_trader import pipeline
+
+                with st.spinner(f"Running {label}…"):
+                    if key == "rl_ingest":
+                        result = pipeline.run_ingest(cfg)
+                    elif key == "rl_features":
+                        result = pipeline.run_features(cfg)
+                    elif key == "rl_phase1":
+                        result = pipeline.run_phase1(cfg, fold_index=int(fold), seed=int(seed))
+                    elif key == "rl_phase2":
+                        result = pipeline.run_phase2(cfg, fold_index=int(fold), seed=int(seed))
+                    else:
+                        result = pipeline.run_phase3(cfg, fold_index=int(fold), seed=int(seed))
+                _rl_result("rl_last_message", f"{label} completed.")
+                _rl_result("rl_last_result", result)
+            except Exception as exc:  # noqa: BLE001 - show failed stage in UI
+                _rl_result("rl_last_message", None)
+                if isinstance(exc, FileNotFoundError):
+                    st.error(
+                        f"{label} failed because the configured input is missing: {exc}. "
+                        "Use `conf/smoke.yaml` for synthetic data or add the configured "
+                        "file under the host `data/` directory."
+                    )
+                else:
+                    st.error(f"{label} failed: {exc}")
+    if st.session_state.get("rl_last_message"):
+        st.success(st.session_state["rl_last_message"])
+
+    st.subheader("Checkpoints")
+    checkpoint_rows = []
+    for phase in (1, 2, 3):
+        path = layout.checkpoint(phase, int(fold), int(seed))
+        checkpoint_rows.append(
+            {
+                "Phase": phase,
+                "Path": str(path),
+                "Available": "yes" if path.exists() else "no",
+            }
+        )
+    st.dataframe(pd.DataFrame(checkpoint_rows), width="stretch", hide_index=True)
+
+    st.subheader("Evaluation")
+    evaluate, paper = st.columns(2)
+    if evaluate.button("Run walk-forward evaluation", key="rl_evaluate", width="stretch"):
+        try:
+            from archetype_trader.pipeline import run_evaluate
+
+            with st.spinner("Running evaluation matrix…"):
+                result = run_evaluate(cfg, make_plots=False)
+            _rl_result("rl_evaluation", result)
+            st.success("Evaluation completed.")
+        except Exception as exc:  # noqa: BLE001 - show failed evaluation in UI
+            st.error(f"Evaluation failed: {exc}")
+    if paper.button("Replay paper test", key="rl_paper", width="stretch"):
+        try:
+            from archetype_trader.pipeline import run_paper
+
+            with st.spinner("Replaying held-out test segment…"):
+                result = run_paper(cfg, fold_index=int(fold), seed=int(seed), split="test")
+            _rl_result("rl_paper_result", result)
+            st.success("Paper replay completed.")
+        except Exception as exc:  # noqa: BLE001 - show failed replay in UI
+            st.error(f"Paper replay failed: {exc}")
+
+    evaluation = st.session_state.get("rl_evaluation")
+    if isinstance(evaluation, dict) and evaluation.get("report") is not None:
+        report = evaluation["report"]
+        st.markdown("#### Evaluation summary")
+        selection = report.selection
+        st.write(
+            f"Selected on validation by `{selection.get('metric')}`: "
+            f"`{selection.get('chosen') or 'none'}`"
+        )
+        if report.cells:
+            st.dataframe(
+                pd.DataFrame(report.table("test")), width="stretch", hide_index=True
+            )
+        verdict = report.verdict
+        st.write(
+            f"Robustness verdict: **{'accepted' if verdict.get('accepted') else 'rejected'}**"
+        )
+
+    paper_result = st.session_state.get("rl_paper_result")
+    if isinstance(paper_result, dict) and paper_result.get("result") is not None:
+        result = paper_result["result"]
+        st.markdown("#### Paper replay summary")
+        first, second, third = st.columns(3)
+        first.metric("Bars", result.bars)
+        second.metric("Final equity", f"{result.final_equity:,.2f}")
+        third.metric("Orders", result.metrics.orders_submitted)
+        st.json(result.agent_stats)
+
+
 def _timezone(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
@@ -1374,6 +1560,10 @@ def main() -> None:
     client = ApiClient(settings.api_base_url)
     effective_settings = _effective_dashboard_settings(settings, client)
     controls = _sidebar(effective_settings, client)
+
+    if controls["page"] == "Deep RL Research":
+        render_rl_page()
+        return
 
     # A fragment reruns on its own timer, so the page refreshes without the user
     # touching anything and without restarting the whole script (§16).

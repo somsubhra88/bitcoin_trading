@@ -306,7 +306,7 @@ async def strategy_options(session: SessionDep, settings: SettingsDep) -> Strate
     )
 
 
-@router.post("/strategy/select", response_model=StrategySelectionResponse)
+@router.get("/strategy/select", response_model=StrategySelectionResponse)
 async def strategy_select(
     strategy_name: str, session: SessionDep, settings: SettingsDep
 ) -> StrategySelectionResponse:
@@ -321,7 +321,7 @@ async def strategy_select(
     return StrategySelectionResponse(strategy_name=name, available_strategies=STRATEGIES)
 
 
-@router.post("/strategy/evaluate", response_model=SignalResponse)
+@router.get("/strategy/evaluate", response_model=SignalResponse)
 async def strategy_evaluate(session: SessionDep, settings: SettingsDep) -> SignalResponse:
     settings = await get_runtime_settings(session, settings)
     signal = await evaluate_and_store(session, settings)

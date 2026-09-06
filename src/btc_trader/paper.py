@@ -239,7 +239,10 @@ async def execute_signal(
         )
         # Risk exits are independent of the model signal. A BUY/HOLD emitted
         # during a drawdown must not suppress the stop.
-        profit_exit = signal.signal in (TradingSignal.SELL, TradingSignal.HOLD) and net_return >= target
+        profit_exit = (
+            signal.signal in (TradingSignal.SELL, TradingSignal.HOLD)
+            and net_return >= target
+        )
         if hard_stop or trailing_stop or profit_exit:
             return await _fill(
                 session,

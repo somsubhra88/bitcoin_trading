@@ -16,6 +16,9 @@ x-app: &app
     # in .env may point somewhere else for local (non-Docker) runs.
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-btc}:${POSTGRES_PASSWORD:-btc}@db:5432/${POSTGRES_DB:-btc_trader}
     API_BASE_URL: http://api:8000
+  volumes:
+    # Historical RL inputs stay on the host and are read-only in containers.
+    - ./data:/app/data:ro
   restart: unless-stopped
   init: true
   stop_grace_period: 30s

@@ -12,6 +12,7 @@ from btc_trader.paper import execute_signal
 from btc_trader.strategy import STRATEGY_VERSION, StrategyParameters, evaluate
 from btc_trader.utils.timeutils import utcnow
 
+
 async def evaluate_and_store(session: AsyncSession, settings: Settings) -> StrategySignal | None:
     # The database-backed effective settings are the cross-process source of
     # truth across API and worker processes.

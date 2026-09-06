@@ -232,6 +232,18 @@ def test_the_page_renders_without_exceptions() -> None:
 
 
 @pytest.mark.usefixtures("api")
+def test_deep_rl_workspace_renders() -> None:
+    app = _run()
+
+    app.sidebar.radio[0].set_value("Deep RL Research").run()
+
+    assert not app.exception, [str(item.value) for item in app.exception]
+    assert app.title[0].value == "Deep RL Research"
+    assert "Phase 1" in {str(button.label) for button in app.button}
+    assert "Evaluation" in {str(element.value) for element in app.subheader}
+
+
+@pytest.mark.usefixtures("api")
 def test_every_section_is_present() -> None:
     """§15: the dashboard must show all of the specified panels."""
     app = _run()

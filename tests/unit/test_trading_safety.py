@@ -95,12 +95,14 @@ def test_live_mode_requires_credentials() -> None:
 
 @pytest.mark.usefixtures("env")
 def test_kill_switch_overrides_every_other_flag() -> None:
-    assert _live_settings(trading_kill_switch=True).live_orders_allowed is False
+    settings = Settings(trading_kill_switch=True)
+    assert settings.live_orders_allowed is False
 
 
 @pytest.mark.usefixtures("env")
 def test_all_switches_plus_credentials_are_required_together() -> None:
-    assert _live_settings().live_orders_allowed is True
+    with pytest.raises(ValidationError, match="real order submission is not implemented"):
+        _live_settings()
 
 
 def test_stale_market_data_threshold_is_configured(settings: Settings) -> None:
@@ -110,7 +112,8 @@ def test_stale_market_data_threshold_is_configured(settings: Settings) -> None:
 
 @pytest.mark.usefixtures("env")
 def test_safe_dump_omits_credentials() -> None:
-    dumped = _live_settings().safe_dump()
+    settings = Settings(bitflyer_api_key=TEST_KEY, bitflyer_api_secret=TEST_SECRET)
+    dumped = settings.safe_dump()
     assert "bitflyer_api_key" not in dumped
     assert "bitflyer_api_secret" not in dumped
     assert "database_url" not in dumped
@@ -122,7 +125,7 @@ def test_safe_dump_omits_credentials() -> None:
 
 @pytest.mark.usefixtures("env")
 def test_repr_does_not_leak_the_secret() -> None:
-    settings = _live_settings()
+    settings = Settings(bitflyer_api_key=TEST_KEY, bitflyer_api_secret=TEST_SECRET)
     assert TEST_SECRET not in repr(settings)
     assert TEST_SECRET not in str(settings)
 

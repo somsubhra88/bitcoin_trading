@@ -128,6 +128,14 @@ class SchedulerService:
 
         if settings.trading_mode is TradingMode.PAPER:
             self._scheduler.add_job(
+                self._safe(self._evaluate_strategy, JOB_STRATEGY),
+                trigger=IntervalTrigger(seconds=settings.market_data_interval_seconds),
+                id=JOB_STRATEGY,
+                name="Evaluate trading strategy",
+                replace_existing=True,
+                next_run_time=utcnow(),
+            )
+            self._scheduler.add_job(
                 self._safe(self._snapshot_portfolio, JOB_PORTFOLIO_SNAPSHOT),
                 trigger=IntervalTrigger(seconds=settings.portfolio_snapshot_interval_seconds),
                 id=JOB_PORTFOLIO_SNAPSHOT,
@@ -165,10 +173,6 @@ class SchedulerService:
     async def _collect_market_data(self) -> None:
         await self._refresh_runtime_settings()
         await self._collector.collect(trigger="scheduled")
-        # Collection owns the cadence: evaluate only after the new observations
-        # have been committed, avoiding a one-interval race with a peer job.
-        if self._settings.trading_mode is not TradingMode.DATA_ONLY:
-            await self._evaluate_strategy()
 
     async def _evaluate_strategy(self) -> None:
         await self._refresh_runtime_settings()

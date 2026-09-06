@@ -1,0 +1,117 @@
+# Fast synthetic smoke test. Runs the whole pipeline end to end on CPU in a
+# couple of minutes so the plumbing can be exercised in CI.
+#
+# It is NOT a testbed. The synthetic generator is a regime-switching GBM with a
+# slow AR(1) drift, which means a trend follower can find the drift almost
+# perfectly. Sharpe ratios in the hundreds are an artifact of that generator, not
+# evidence of anything. Use conf/btc_full.yaml on real bars to learn anything
+# about the strategy.
+name: smoke
+seed: 0
+seeds: [0, 1]
+device: auto
+output_dir: runs
+
+data:
+  source: synthetic
+  symbol: BTCUSDT
+  bar_minutes: 10
+  orderbook_levels: 0        # OHLCV-only baseline
+  synthetic:
+    n_bars: 6000
+    seed: 7
+
+features:
+  lookback: 24
+  return_windows: [1, 3, 6, 12]
+  vol_windows: [12, 36]
+  ma_windows: [12, 36]
+  momentum_windows: [6, 24]
+  macd: [6, 12, 4]
+  downside_vol_window: 12
+  rsi_window: 14
+  atr_window: 14
+  include_time_encodings: true
+  include_orderbook: false
+
+splits:
+  scheme: rolling
+  n_folds: 2
+  train_bars: 1600
+  val_bars: 500
+  test_bars: 500
+  extra_embargo_bars: 0
+
+env:
+  mode: perp                 # exercises the {-1,0,+1} path and funding
+  initial_cash: 100000.0
+  leverage: 1.0
+  position_levels: 2
+  max_episode_bars: 600
+  costs:
+    taker_fee_bps: 5.0
+    maker_fee_bps: 1.0
+    fallback_half_spread_bps: 1.0
+    slippage_coef: 1.0
+    max_participation: 0.05
+    latency_bars: 1
+    funding_bps_per_8h: 1.0
+    funding_interval_bars: 48
+  reward:
+    turnover_penalty: 0.0
+    downside_penalty: 0.0
+    drawdown_penalty: 0.0
+
+shield:
+  enabled: true
+  max_gross_exposure: 1.0
+  max_net_exposure: 1.0
+  max_leverage: 1.0
+  max_daily_loss: 0.05
+  max_drawdown: 0.25
+  cooldown_bars: 6
+
+planner:
+  horizon: 24
+  max_changes: 1
+
+phase1:
+  n_trajectories: 600
+  horizon: 24                # must equal planner.horizon
+  codebook_size: 6
+  code_dim: 8
+  hidden_dim: 48
+  epochs: 8
+  batch_size: 64
+
+phase2:
+  algo: recurrent_ppo
+  hidden_dim: 48
+  context_bars: 24
+  updates: 8
+  horizons_per_update: 8
+  epochs_per_update: 2
+  minibatch_size: 4
+
+phase3:
+  hidden_dim: 48
+  override_budget: 1
+  # Deliberately above the ~20-epoch floor where the adapter stops retaining
+  # everywhere. Below it the phase1_2_3 row is numerically identical to
+  # phase1_2 and the ablation says nothing.
+  epochs: 24
+  n_episodes: 300
+  batch_size: 64
+
+baselines:
+  enabled: [cash, buy_and_hold, ema_cross, macd, vol_target_trend]
+  rl_updates: 4
+  rl_steps_per_update: 256
+
+eval:
+  seeds: [0, 1]
+  bootstrap_samples: 200
+  bootstrap_block_bars: 48
+  stress_multipliers: [0.5, 1.0, 2.0, 4.0]
+  selection_metric: calmar
+  make_plots: false

@@ -94,6 +94,7 @@ class _Observation:
     ask: Decimal | None
     ltp: Decimal | None
     decision: SignalDecision | None
+    proposed_decision: SignalDecision | None = None
 
 
 def strategy_parameters(settings: Settings) -> StrategyParameters:
@@ -140,18 +141,17 @@ def run_backtest(
         decision = observation.decision
         mark = observation.mark
 
-        if decision is not None:
+        if (
+            decision is not None
+            and decision.signal is TradingSignal.BUY
+            and quantity == 0
+            and decision.confidence >= settings.paper_min_confidence
+            and not _daily_loss_reached(
+                realized_by_day, observation.timestamp, settings.max_daily_loss_jpy
+            )
+        ):
             # Evaluate risk exits before acting on the strategy signal. A
             # BUY/HOLD cannot veto a hard or trailing stop.
-            if decision.signal is TradingSignal.BUY:
-                buy_signals += 1
-                if (
-                    quantity == 0
-                    and decision.confidence >= settings.paper_min_confidence
-                    and not _daily_loss_reached(
-                        realized_by_day, observation.timestamp, settings.max_daily_loss_jpy
-                    )
-                ):
                     buy_price = _fill_price(observation, TradingSignal.BUY, settings)
                     if buy_price is not None:
                         allocation = settings.strategy_risk_fraction * (
@@ -174,54 +174,58 @@ def run_backtest(
                             entry_timestamp = observation.timestamp
                             high_watermark = buy_price
 
-            elif decision.signal is TradingSignal.SELL:
+        if observation.proposed_decision is not None:
+            if observation.proposed_decision.signal is TradingSignal.BUY:
+                buy_signals += 1
+            elif observation.proposed_decision.signal is TradingSignal.SELL:
                 sell_signals += 1
 
-            if quantity > 0 and entry_timestamp is not None:
-                high_watermark = max(high_watermark, mark)
-                sell_price = _fill_price(observation, TradingSignal.SELL, settings)
-                if sell_price is not None:
-                    fee = sell_price * quantity * settings.taker_fee_percent / Decimal("100")
-                    net_pnl = sell_price * quantity - fee - cost_basis
-                    target = settings.min_profit_percent / Decimal("100")
-                    net_return = net_pnl / cost_basis if cost_basis else Decimal("0")
-                    trailing = (
-                        settings.paper_trailing_stop_percent > 0
-                        and sell_price
-                        <= high_watermark
-                        * (Decimal("1") - settings.paper_trailing_stop_percent / Decimal("100"))
-                    )
-                    hard_stop = (
-                        settings.paper_stop_loss_percent > 0
-                        and sell_price
-                        <= entry_price
-                        * (Decimal("1") - settings.paper_stop_loss_percent / Decimal("100"))
-                    )
-                    profit_exit = decision.signal in (TradingSignal.SELL, TradingSignal.HOLD) and (
-                        net_return >= target
-                    )
-                    if hard_stop or trailing or profit_exit:
-                        cash += sell_price * quantity - fee
-                        trades.append(
-                            BacktestTrade(
-                                entry_timestamp=entry_timestamp,
-                                exit_timestamp=observation.timestamp,
-                                entry_price=entry_price,
-                                exit_price=sell_price,
-                                size=quantity,
-                                net_pnl_jpy=net_pnl,
-                                return_percent=net_return * Decimal("100"),
-                            )
+        if quantity > 0 and entry_timestamp is not None:
+            high_watermark = max(high_watermark, mark)
+            sell_price = _fill_price(observation, TradingSignal.SELL, settings)
+            if sell_price is not None:
+                fee = sell_price * quantity * settings.taker_fee_percent / Decimal("100")
+                net_pnl = sell_price * quantity - fee - cost_basis
+                target = settings.min_profit_percent / Decimal("100")
+                net_return = net_pnl / cost_basis if cost_basis else Decimal("0")
+                trailing = (
+                    settings.paper_trailing_stop_percent > 0
+                    and sell_price
+                    <= high_watermark
+                    * (Decimal("1") - settings.paper_trailing_stop_percent / Decimal("100"))
+                )
+                hard_stop = (
+                    settings.paper_stop_loss_percent > 0
+                    and sell_price
+                    <= entry_price
+                    * (Decimal("1") - settings.paper_stop_loss_percent / Decimal("100"))
+                )
+                profit_exit = decision is not None and decision.signal in (
+                    TradingSignal.SELL,
+                    TradingSignal.HOLD,
+                ) and net_return >= target
+                if hard_stop or trailing or profit_exit:
+                    cash += sell_price * quantity - fee
+                    trades.append(
+                        BacktestTrade(
+                            entry_timestamp=entry_timestamp,
+                            exit_timestamp=observation.timestamp,
+                            entry_price=entry_price,
+                            exit_price=sell_price,
+                            size=quantity,
+                            net_pnl_jpy=net_pnl,
+                            return_percent=net_return * Decimal("100"),
                         )
-                        realized_by_day[observation.timestamp.date()] = (
-                            realized_by_day.get(observation.timestamp.date(), Decimal("0"))
-                            + net_pnl
-                        )
-                        quantity = Decimal("0")
-                        cost_basis = Decimal("0")
-                        entry_price = Decimal("0")
-                        entry_timestamp = None
-                        high_watermark = Decimal("0")
+                    )
+                    realized_by_day[observation.timestamp.date()] = (
+                        realized_by_day.get(observation.timestamp.date(), Decimal("0"))
+                        + net_pnl
+                    )
+                    quantity = Decimal("0")
+                    cost_basis = Decimal("0")
+                    entry_price = Decimal("0")
+                    entry_timestamp = None
+                    high_watermark = Decimal("0")
 
         equity = cash + quantity * mark
         equity_curve.append(
@@ -232,6 +236,28 @@ def run_backtest(
         )
 
     last_mark = observations[-1].mark if observations else None
+    if observations and quantity > 0 and entry_timestamp is not None:
+        # A finite backtest must settle inventory at its final observable mark;
+        # otherwise the reported equity contains an unclosed position and the
+        # trade statistics omit its realised costs.
+        last_observation = observations[-1]
+        sell_price = _fill_price(last_observation, TradingSignal.SELL, settings)
+        fee = sell_price * quantity * settings.taker_fee_percent / Decimal("100")
+        net_pnl = sell_price * quantity - fee - cost_basis
+        net_return = net_pnl / cost_basis if cost_basis else Decimal("0")
+        cash += sell_price * quantity - fee
+        trades.append(
+            BacktestTrade(
+                entry_timestamp=entry_timestamp,
+                exit_timestamp=last_observation.timestamp,
+                entry_price=entry_price,
+                exit_price=sell_price,
+                size=quantity,
+                net_pnl_jpy=net_pnl,
+                return_percent=net_return * Decimal("100"),
+            )
+        )
+        quantity = Decimal("0")
     final_equity = cash + quantity * last_mark if last_mark is not None else cash
     metrics = _metrics(
         name,
@@ -469,6 +495,7 @@ def _delay_decisions(observations: list[_Observation]) -> list[_Observation]:
                 ask=observation.ask,
                 ltp=observation.ltp,
                 decision=previous,
+                proposed_decision=observation.decision,
             )
         )
         previous = observation.decision

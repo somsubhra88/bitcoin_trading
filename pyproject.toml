@@ -35,14 +35,44 @@ dev = [
     "respx>=0.22,<0.23",
     "ruff>=0.8,<0.15",
     "mypy>=1.13,<2.0",
+    "hypothesis>=6.100,<7.0",
 ]
+# ArchetypeTrader: the reinforcement-learning research stack (see rl.md).
+# Kept as an extra so the FastAPI market-data service does not have to ship
+# PyTorch. Bounds are upper-capped to keep CUDA/torch resolution reproducible.
+research = [
+    "torch>=2.5,<3.0",
+    "gymnasium>=1.0,<2.0",
+    "polars>=1.0,<2.0",
+    "pyarrow>=17.0,<27.0",
+    "typer>=0.12,<1.0",
+    "pyyaml>=6.0,<7.0",
+    "matplotlib>=3.9,<4.0",
+]
+# Runtime dependencies for the dashboard image. Torch is installed separately
+# from the CPU-only PyTorch index in Dockerfile so CUDA/NVIDIA wheels are not
+# copied into every API, worker, and dashboard container.
+research_ui = [
+    "gymnasium>=1.0,<2.0",
+    "polars>=1.0,<2.0",
+    "pyarrow>=17.0,<27.0",
+    "typer>=0.12,<1.0",
+    "pyyaml>=6.0,<7.0",
+    "matplotlib>=3.9,<4.0",
+]
+
+[project.scripts]
+# Requires the `research` extra (torch, gymnasium, typer). Installed without it,
+# the entry point exists and fails at import with a clear ModuleNotFoundError
+# rather than half-running.
+archetype-trader = "archetype_trader.cli:main"
 
 [build-system]
 requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/btc_trader"]
+packages = ["src/btc_trader", "src/archetype_trader"]
 
 [tool.ruff]
 line-length = 100
@@ -72,6 +102,9 @@ known-first-party = ["btc_trader", "dashboard", "tests"]
 # Tests: asserts are the point, and fixtures use throwaway credentials.
 "tests/**" = ["E501", "S101", "S105", "S106"]
 "migrations/**" = ["E501"]
+
+[tool.pyright]
+extraPaths = ["src", "."]
 
 [tool.mypy]
 python_version = "3.12"
